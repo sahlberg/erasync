@@ -1,0 +1,104 @@
+# erasync
+
+erasync is a file syncing tool that uses dm-era to determine what data needs
+to be replicated.
+
+Traditional tools, like rsync, computes hashes across the entire file, both
+locally and on the destination, in order to determine what changed and what
+needs to be transfered.
+While that works well for most use cases it does not work very well for
+very large files with small change-sets, such as large databases and VM images
+and such.
+
+"I spent boundless CPU and I/O bandwidth to crunch hashes on my TB sized files
+ just to figure out I just need to copy 4kb across.
+  --ronnie"
+
+In order to do so you need to have dm-era configured and in use on both SRC
+and DST and then erasync will use the dm-era change-log to determine what
+parts of the files are modified and needs to be synced.
+
+First copy is always the entire file but later copies are just the blocks
+that have changed.
+
+erasync copies a directory SRC into a directory DEST, or a single file.
+A file is written to DEST, or into DEST when DEST is a directory.
+It replicates regular files, directories, symlinks, fifos, sockets, and
+device nodes. Symlinks are copied as symlinks. Device nodes are recreated.
+
+erasync must run as root, on both hosts of a remote copy: the dm-era
+metadata and the era logs are only readable by root. It also needs
+era_invalidate from thin-provisioning-tools and user extended attributes
+on DEST. The era of each file is stored in the user.erasync.era xattr and
+in /var/lib/erasync/era/<device-id>. Both SRC and DEST must be on dm-era
+devices: erasync refuses anything else, and cp or rsync are the tools for
+that.
+
+That log belongs to the machine that owns the dm-era device. It is not
+inside the directory being copied, so it is not part of an NFS export of
+that directory, and the device-mapper target is not visible there either.
+Mounting DEST and reading it locally does not give access to the
+destination era. A remote SRC or DEST is written host:path, or
+user@host:path. erasync runs erasync on that host over ssh, and that
+process reads the era device and /var/lib/erasync/era there. The other
+path stays on this machine. The remote program is erasync on the remote
+PATH, unless --remote-path names another one.
+
+```
+erasync [-v] [-n] [--delete] [--exclude PATTERN]... [--force[=PATTERN]]...
+        SRC DEST
+```
+
+-v prints each file. -n prints the actions and writes nothing. --delete
+removes destination names that are not in the source. --exclude skips
+entries that match a shell pattern, and keeps them in the destination
+with --delete. It may be given more than once. A pattern without a '/'
+matches names at any depth; see erasync(1) for the rest. --force copies
+files whole instead of the changed blocks: every file, or with
+--force=PATTERN the files that match.
+
+```
+erasync -v /vm/images /backup/images
+erasync -v /vm/images/disk.qcow2 /backup/images/disk.qcow2
+erasync -v /vm/images 10.10.10.11:/backup/images
+erasync --exclude='*-tester*.qcow2' /vm/images /backup/images
+erasync --force='*-base*.qcow2' /vm/images /backup/images
+```
+
+## Design
+
+A copy has a sender, which walks the source tree and decides what each
+file needs, and a receiver, which does all the writing at the
+destination. For a local copy the sender calls the receiver directly and
+the bytes are copied with copy_file_range. For a remote copy the same
+calls travel over ssh as frames (see remote.c). Only directory listings
+wait for an answer, so a directory costs one round trip however many
+files it holds.
+
+The sources:
+
+- sender.c: the tree walk and the plan for each file
+- receiver.c: everything that changes the destination
+- sync.c: a local copy
+- remote.c, proto.c: a remote copy and its frames
+- era.c: dm-era devices, snapshots and dirty blocks
+- record.c: the user.erasync.era xattr, starting with "v1 "
+- dm.c: device-mapper tables and messages
+
+The comment at the top of era.c describes when the era records are
+written.
+
+## Installing
+
+`make install` installs erasync and its man page under /usr/local.
+Set PREFIX, or DESTDIR for packaging, to install elsewhere.
+
+## Testing
+
+`make check` needs root: tests/era.sh builds dm-era devices on loop
+files, runs the tree tests on them, and checks incremental copies locally
+and over the protocol, in both directions. Without root the dm-era tests
+are skipped.
+
+License: BSD-2-Clause.
+

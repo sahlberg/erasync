@@ -1,0 +1,5 @@
+#!/bin/sh
+# Local stand-in for ssh. The first argument is the host; the rest is the
+# remote command, which erasync starts as "erasync --server".
+shift
+exec "$@"

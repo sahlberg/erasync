@@ -1,0 +1,311 @@
+.\" Copyright (C) 2026 Ronnie Sahlberg. SPDX-License-Identifier: BSD-2-Clause
+.TH ERASYNC 1 2026-11-12 erasync "User Commands"
+.SH NAME
+erasync \- copy files and trees, using dm-era to find what changed
+.SH SYNOPSIS
+.B erasync
+.RI [ options ]
+.I SRC DEST
+.SH DESCRIPTION
+.B erasync
+makes
+.I DEST
+a copy of the directory tree
+.IR SRC .
+.I SRC
+may also be a single file, symlink or special file: it is written to
+.IR DEST ,
+or into
+.I DEST
+when
+.I DEST
+is a directory.
+.PP
+Tools such as
+.BR rsync (1)
+read and hash whole files on both sides to find what changed.
+For very large files with small changes, such as virtual machine images
+and databases, that costs far more than the copy itself.
+.B erasync
+asks dm-era instead.
+A regular file on a dm-era device is updated from the blocks written
+since the era recorded on the destination, plus any blocks written on
+the destination itself when it is also on dm-era.
+The first copy of a file is the whole file.
+Later copies read and write only the blocks that changed.
+.PP
+Both
+.I SRC
+and
+.I DEST
+must be on dm-era devices.
+.B erasync
+refuses to copy anything else; use
+.BR cp (1)
+or
+.BR rsync (1)
+for that.
+A regular file below
+.I SRC
+that is on another filesystem, which is not on dm-era, is reported as an
+error and skipped.
+.PP
+Regular files, directories, symlinks, fifos, sockets and device nodes
+are replicated.
+Symlinks are copied as symlinks and are not followed.
+Device nodes are recreated.
+A hard link is copied as a file of its own.
+Mode, owner and mtime are copied.
+Entries in
+.I DEST
+that are not in
+.I SRC
+are left in place unless
+.B \-\-delete
+is given.
+.PP
+A whole file is written to a temporary file and renamed into place, so
+the destination is never half written.
+Names in
+.I DEST
+that start with
+.B .erasync.tmp.\&
+are unfinished copies and are removed.
+.SH OPTIONS
+.TP
+.BR \-n ", " \-\-dry\-run
+Show what would be done, without writing anything or taking era
+snapshots.
+Files are compared by size and mtime only.
+.TP
+.BR \-v ", " \-\-verbose
+Also show unchanged files, and how each file was copied: the bytes sent,
+the bytes the copy had to read and the size of the file.
+.TP
+.BR \-q ", " \-\-quiet
+Show errors only, and no copy progress.
+.TP
+.B \-\-delete
+Remove entries in
+.I DEST
+that are not in
+.IR SRC .
+This applies to a directory tree, and the walk does not follow symlinks.
+.TP
+.BI \-\-exclude " PATTERN"
+Skip entries below
+.I SRC
+that match
+.IR PATTERN ,
+and everything below an excluded directory.
+With
+.BR \-\-delete ,
+entries in
+.I DEST
+that match are kept.
+May be given more than once; an entry is skipped when any pattern
+matches.
+See
+.B PATTERNS
+below.
+.TP
+.BR \-\-force [ =\fIPATTERN\fR ]
+Copy files whole instead of only the blocks dm-era saw change, and store
+a fresh era record.
+Without a pattern this applies to every regular file, for a full resync.
+With a pattern it applies to the files that match, and to everything
+below a directory that matches.
+The pattern needs the
+.BR = :
+.B \-\-force
+followed by a separate word means a plain
+.BR \-\-force .
+May be given more than once.
+.TP
+.BR \-e ", " \-\-rsh " \fICMD\fR"
+The remote shell to run instead of
+.BR ssh .
+.I CMD
+is split at spaces.
+.TP
+.BI \-\-remote\-path " PROG"
+The
+.B erasync
+to run on the remote host.
+The default is
+.B erasync
+on the remote
+.BR PATH .
+.TP
+.B \-\-server
+Speak the copy protocol on standard input and output.
+This is what the remote side runs; it is not meant to be used directly.
+.TP
+.BR \-h ", " \-\-help
+Show a summary of the usage.
+.SH PATTERNS
+The patterns of
+.B \-\-exclude
+and
+.B \-\-force
+are shell wildcards, matched with
+.BR fnmatch (3).
+.IP \(bu 2
+A pattern without a
+.B /
+matches the name of an entry at any depth:
+.B *\-tester*.qcow2
+skips every file whose name matches, in every directory.
+.IP \(bu 2
+A pattern with a
+.B /
+matches the end of the path of an entry below
+.IR SRC ,
+and
+.B *
+does not match a
+.BR / :
+.B vm/*.img
+matches
+.I vm/a.img
+and
+.IR old/vm/b.img .
+A leading
+.B /
+anchors the pattern at the top of
+.IR SRC :
+.B /logs
+matches
+.I SRC/logs
+only.
+.IP \(bu 2
+A trailing
+.B /
+makes the pattern match directories only:
+.B cache/
+skips every directory named cache.
+.PP
+Quote the pattern, or escape its wildcards, so that the shell does not
+expand it:
+.B \-\-exclude='*\-tester*.qcow2'
+or
+.BR \-\-exclude=\e*\-tester\e*.qcow2 .
+.SH REMOTE COPIES
+Either
+.I SRC
+or
+.I DEST
+may be
+.RI [ USER @] HOST : PATH ,
+or
+.RI [ HOST ]: PATH
+for an IPv6 address.
+.B erasync
+runs
+.B erasync \-\-server
+on that host over
+.BR ssh ,
+and the two copies of the program talk over that connection.
+One side must be local.
+A path with a slash before the first colon is a local name.
+.PP
+The era of a device can only be read on the host that owns the device,
+so each side reads its own dm-era device and era log.
+Mounting a remote
+.I DEST
+over NFS and copying to it locally does not see the destination era.
+.PP
+Both hosts must run versions of
+.B erasync
+that speak the same protocol.
+.SH REQUIREMENTS
+.B erasync
+must run as root, on both hosts of a remote copy, because the dm-era
+metadata and the era logs are only readable by root.
+It needs
+.BR era_invalidate (8),
+.BR fnmatch (3)
+from thin-provisioning-tools, and user extended attributes on the
+destination filesystem.
+.PP
+A dm-era device allows one metadata snapshot at a time.
+Runs that use the same device wait for each other, for up to ten
+minutes.
+.SH FILES
+.TP
+.B user.erasync.era
+An extended attribute on each destination file.
+It records the source era the bytes came from and, once the copy is
+complete, the destination era after which a write means the copy was
+changed by something other than
+.BR erasync .
+A file without a valid record is copied whole.
+.TP
+.BI /var/lib/erasync/era/ device-id
+The log of eras for one dm-era device.
+An era number is only trusted when its exact entry is in this log,
+because recreating the dm-era metadata restarts the numbering.
+Deleting a log makes the next run copy the files on that device whole
+once.
+.SH EXIT STATUS
+.TP
+.B 0
+Everything was copied.
+.TP
+.B 1
+Some entries could not be copied; the errors were printed.
+.TP
+.B 2
+The copy could not be run or was interrupted, for example because of a
+bad argument, a missing requirement, a broken connection or a signal.
+.SH EXAMPLES
+Copy a tree of images, then keep it up to date:
+.PP
+.RS
+.nf
+erasync \-v /vm/images /backup/images
+.fi
+.RE
+.PP
+Copy one image:
+.PP
+.RS
+.nf
+erasync /vm/images/disk.qcow2 /backup/images/disk.qcow2
+.fi
+.RE
+.PP
+Copy a tree of images, without the scratch images of test machines:
+.PP
+.RS
+.nf
+erasync \-\-exclude='*\-tester*.qcow2' /vm/images /backup/images
+.fi
+.RE
+.PP
+Copy the base images whole, and the rest as usual:
+.PP
+.RS
+.nf
+erasync \-\-force='*\-base*.qcow2' /vm/images /backup/images
+.fi
+.RE
+.PP
+Copy a tree to another host, and remove what is gone from the source:
+.PP
+.RS
+.nf
+erasync \-\-delete /vm/images backup.example.com:/backup/images
+.fi
+.RE
+.SH NOTES
+A file that is being written while it is copied, such as the disk of a
+running virtual machine, may be copied in an inconsistent state.
+dm-era sees those writes, and the next run copies them again.
+.SH SEE ALSO
+.BR cp (1),
+.BR rsync (1),
+.BR ssh (1),
+.BR dmsetup (8),
+.BR era_invalidate (8),
+.BR fnmatch (3)

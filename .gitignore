@@ -1,0 +1,5 @@
+erasync
+*.o
+tests/ranges_test
+*~
+TAGS
