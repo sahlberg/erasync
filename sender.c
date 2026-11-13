@@ -108,23 +108,48 @@ static void plan_forced(int sfd, const struct stat *sst,
         out->set_mtime = mtime_ok;
 }
 
-/* A dry run decides from the size and mtime alone, without dm-era. */
+/*
+ * A dry run decides from the size and mtime alone, without dm-era, so
+ * the bytes to copy are an estimate: the allocated bytes of the source
+ * for a whole-file copy, and at most that when the destination has an
+ * era record, since only dm-era knows which blocks changed.
+ */
 static int report_dry_run(struct dest *d, const char *rel,
                           const struct stat *sst, const struct dest_state *ds,
                           int forced)
 {
+        unsigned long long bytes = (unsigned long long)sst->st_blocks * 512;
+        const char *how = "whole file";
+        char size[32];
+        char detail[64];
+        int action = A_UPDATE;
+
+        if (bytes > (unsigned long long)sst->st_size) {
+                bytes = (unsigned long long)sst->st_size;
+        }
+        format_bytes(size, sizeof size, bytes);
+
         if (!ds->exists) {
-                return d->ops->report(d->ctx, A_CREATE, rel, "dry-run");
-        }
-        if (forced) {
-                return d->ops->report(d->ctx, A_UPDATE, rel,
-                                      "dry-run, forced");
-        }
-        if (ds->type == T_REG && sst->st_size == ds->st.st_size &&
-            times_equal(&sst->st_mtim, &ds->st.st_mtim)) {
+                action = A_CREATE;
+                how = "new file";
+        } else if (forced) {
+                how = "forced";
+        } else if (ds->type == T_REG && sst->st_size == ds->st.st_size &&
+                   times_equal(&sst->st_mtim, &ds->st.st_mtim)) {
                 return d->ops->report(d->ctx, A_SKIP, rel, NULL);
+        } else if (ds->type == T_REG && !ds->force_full && ds->xattr &&
+                   ds->xattr[0]) {
+                how = NULL;
         }
-        return d->ops->report(d->ctx, A_UPDATE, rel, "dry-run");
+
+        if (how) {
+                snprintf(detail, sizeof detail, "%s, %s%s", size, how,
+                         ESTIMATE);
+        } else {
+                snprintf(detail, sizeof detail, "up to %s%s", size, ESTIMATE);
+        }
+        stats.estimate += bytes;
+        return d->ops->report(d->ctx, action, rel, detail);
 }
 
 static int send_file(struct dest *d, int sdir, const char *sname,

@@ -21,6 +21,11 @@ struct counters {
         unsigned long deleted;
         unsigned long errors;
         unsigned long long bytes;
+        /*
+         * A dry run's estimate of the bytes to copy, made by the sender.
+         * It stays 0 on the client of a pull.
+         */
+        unsigned long long estimate;
 };
 extern struct counters stats;
 
@@ -65,6 +70,12 @@ void patterns_add(struct patterns *list, const char *text);
 
 /* Whether rel, a path below SRC, matches one of the patterns. */
 int patterns_match(const struct patterns *list, const char *rel, int is_dir);
+
+/*
+ * The end of a dry run's detail for a file: the bytes to copy, guessed
+ * without dm-era. report_action prints it on its own line.
+ */
+#define ESTIMATE " (estimate)"
 
 /* Count and print one action. An A_ERROR prints detail as the error. */
 void report_action(int action, const char *rel, const char *detail);

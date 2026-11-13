@@ -352,13 +352,28 @@ static void delete_extra(struct receiver *r, int dfd, const char *rel,
         names_free(&names);
 }
 
-/* The destination state of the regular file name in dfd. */
+/* Blocks of the destination file name written by something else. */
+static void dest_ranges(struct receiver *r, int fd, const char *rel,
+                        const char *name, struct dest_state *s)
+{
+        char *child = path_join(rel, name);
+        char *full = full_path(r, child);
+
+        era_set_context(child, (unsigned long long)s->st.st_size);
+        era_dest_ranges(fd, &s->st, full, &s->dirty);
+        era_set_context(NULL, 0);
+        free(full);
+        free(child);
+}
+
+/*
+ * The destination state of the regular file name in dfd. A dry run reads
+ * the xattr for its estimate, but takes no snapshot for the dirty blocks.
+ */
 static void fill_state(struct receiver *r, int dfd, const char *rel,
                        const char *name, struct dest_state *s)
 {
         char xattr[ERA_STATE_MAX];
-        char *child;
-        char *full;
         int fd;
 
         s->type = T_MISSING;
@@ -367,25 +382,20 @@ static void fill_state(struct receiver *r, int dfd, const char *rel,
         }
         s->exists = 1;
         s->type = file_type(&s->st);
-        if (s->type != T_REG || opt_dry_run) {
+        if (s->type != T_REG) {
                 return;
         }
         fd = open_read(dfd, name);
         if (fd < 0) {
                 return;
         }
-
-        child = path_join(rel, name);
-        full = full_path(r, child);
-        era_set_context(child, (unsigned long long)s->st.st_size);
-        era_dest_ranges(fd, &s->st, full, &s->dirty);
-        era_set_context(NULL, 0);
+        if (!opt_dry_run) {
+                dest_ranges(r, fd, rel, name, s);
+        }
         if (era_get_xattr(fd, xattr, sizeof xattr) == 0) {
                 s->xattr = xstrdup(xattr);
         }
         close(fd);
-        free(full);
-        free(child);
 }
 
 int rcv_list(struct receiver *r, const char *rel, int sweep,

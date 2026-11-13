@@ -1,6 +1,7 @@
 /* -*-  mode:c; tab-width:8; c-basic-offset:8; indent-tabs-mode:nil;  -*- */
 /* Copyright (C) 2026 Ronnie Sahlberg. SPDX-License-Identifier: BSD-2-Clause */
 #include "common.h"
+#include "config.h"
 #include "era.h"
 #include "remote.h"
 #include "sync.h"
@@ -13,7 +14,7 @@
 #include <unistd.h>
 
 static const char help_text[] =
-        "Usage: erasync [options] SRC DEST\n"
+        "Usage: erasync [options] SRC [DEST]\n"
         "\n"
         "Make DEST a copy of the directory tree SRC. SRC may also be a single\n"
         "file, symlink, or special file: it is written to DEST, or into DEST\n"
@@ -61,6 +62,10 @@ static const char help_text[] =
         "      --remote-path PROG\n"
         "                  erasync on the remote host (default: erasync)\n"
         "      --server    speak the copy protocol on standard input\n"
+        "      --config FILE\n"
+        "                  read options from FILE instead of\n"
+        "                  ~/.config/erasync/config\n"
+        "      --no-config don't read a config file\n"
         "  -h, --help\n"
         "\n"
         "A PATTERN without a '/' matches an entry's name at any depth, such as\n"
@@ -68,6 +73,16 @@ static const char help_text[] =
         "path below SRC, unless a leading '/' anchors it at the top of SRC.\n"
         "A trailing '/' matches directories only, and a forced directory\n"
         "forces everything below it.\n"
+        "\n"
+        "The config file holds options to use without typing them. Options\n"
+        "before the first \"sync SRC DEST\" line apply to every copy, the\n"
+        "ones after it only to a copy of that SRC to that DEST. One option per\n"
+        "line, without shell quotes; see erasync(1). For example:\n"
+        "\n"
+        "  sync /vm/images 10.10.10.11:/backup/images\n"
+        "          --exclude *-tester*.qcow2\n"
+        "\n"
+        "Without DEST, the DEST of the sync line for SRC is used.\n"
         "\n"
         "Names starting with .erasync.tmp. in DEST are unfinished copies and\n"
         "are removed. Deleting an era log makes the next sync copy those\n"
@@ -79,6 +94,8 @@ enum {
         OPT_REMOTE_PATH,
         OPT_EXCLUDE,
         OPT_FORCE,
+        OPT_CONFIG,
+        OPT_NO_CONFIG,
 };
 
 static const struct option long_options[] = {
@@ -92,8 +109,22 @@ static const struct option long_options[] = {
         { "remote-path", required_argument, NULL, OPT_REMOTE_PATH },
         { "exclude",     required_argument, NULL, OPT_EXCLUDE },
         { "force",       optional_argument, NULL, OPT_FORCE },
+        { "config",      required_argument, NULL, OPT_CONFIG },
+        { "no-config",   no_argument,       NULL, OPT_NO_CONFIG },
         { NULL, 0, NULL, 0 }
 };
+
+static const char short_options[] = "+:hvqne:";
+
+/* --config and --no-config, found by scan_options. */
+static const char *config_path;
+static int no_config;
+
+/* The options taken from the config file, shown unless -q. */
+static int config_argc;
+static char **config_argv;
+/* DEST was taken from the config file. */
+static int config_dest_used;
 
 static void usage(int code)
 {
@@ -109,36 +140,57 @@ static void on_signal(int sig)
 
 static void summary(void)
 {
+        char size[32];
+
         if (opt_quiet) {
                 return;
         }
         printf("erasync:%s created %lu, updated %lu, metadata %lu, "
-               "unchanged %lu, deleted %lu, errors %lu, copied %llu bytes\n",
+               "unchanged %lu, deleted %lu, errors %lu, ",
                opt_dry_run ? " dry-run:" : "",
                stats.created, stats.updated, stats.meta, stats.unchanged,
-               stats.deleted, stats.errors,
-               (unsigned long long)stats.bytes);
+               stats.deleted, stats.errors);
+        if (opt_dry_run && stats.estimate) {
+                format_bytes(size, sizeof size, stats.estimate);
+                printf("up to %s to copy%s\n", size, ESTIMATE);
+                return;
+        }
+        printf("copied %llu bytes\n", (unsigned long long)stats.bytes);
 }
 
-/* Parse the options. Returns whether --server was given. */
-static int parse_options(int argc, char **argv)
+/*
+ * Parse argv, the command line or the options from the config file
+ * (in_config, with the file name as argv[0]). -v and -q override each
+ * other between the two. Returns whether --server was given.
+ */
+static int parse_options(int argc, char **argv, int in_config)
 {
+        const char *where = in_config ? argv[0] : "";
+        const char *sep = in_config ? ": " : "";
         int server = 0;
+        int verbose = 0;
+        int quiet = 0;
         int c;
 
         opterr = 0;
+        optind = 0;
         /* '+' stops at the first operand, ':' reports a missing argument */
-        while ((c = getopt_long(argc, argv, "+:hvqne:", long_options,
+        while ((c = getopt_long(argc, argv, short_options, long_options,
                                 NULL)) != -1) {
+                if (in_config && (c == 'h' || c == OPT_SERVER ||
+                                  c == OPT_CONFIG || c == OPT_NO_CONFIG)) {
+                        die("%s: %s is not allowed in the config file",
+                            where, argv[optind - 1]);
+                }
                 switch (c) {
                 case 'h':
                         usage(0);
                         break;
                 case 'v':
-                        opt_verbose = 1;
+                        verbose = 1;
                         break;
                 case 'q':
-                        opt_quiet = 1;
+                        quiet = 1;
                         break;
                 case 'n':
                         opt_dry_run = 1;
@@ -165,19 +217,132 @@ static int parse_options(int argc, char **argv)
                                 opt_force_all = 1;
                         }
                         break;
+                case OPT_CONFIG:
+                case OPT_NO_CONFIG:
+                        /* taken by scan_options */
+                        break;
                 case ':':
-                        die("%s needs an argument", argv[optind - 1]);
+                        die("%s%s%s needs an argument", where, sep,
+                            argv[optind - 1]);
                 default:
                         if (optopt) {
-                                die("unknown option -%c", optopt);
+                                die("%s%sunknown option -%c", where, sep,
+                                    optopt);
                         }
-                        die("unknown option %s", argv[optind - 1]);
+                        die("%s%sunknown option %s", where, sep,
+                            argv[optind - 1]);
                 }
         }
-        if (opt_verbose && opt_quiet) {
-                die("do not combine -v and -q");
+        if (in_config && optind < argc) {
+                die("%s: unexpected %s", where, argv[optind]);
+        }
+        if (verbose && quiet) {
+                die("%s%sdo not combine -v and -q", where, sep);
+        }
+        if (verbose) {
+                opt_verbose = 1;
+                opt_quiet = 0;
+        }
+        if (quiet) {
+                opt_quiet = 1;
+                opt_verbose = 0;
         }
         return server;
+}
+
+/*
+ * Find --server, --config and --no-config, and leave optind at the
+ * operands, before the config file is read. -h and bad options are
+ * handled by parse_options, before the config file can fail.
+ */
+static int scan_options(int argc, char **argv)
+{
+        int server = 0;
+        int c;
+
+        opterr = 0;
+        optind = 0;
+        while ((c = getopt_long(argc, argv, short_options, long_options,
+                                NULL)) != -1) {
+                switch (c) {
+                case OPT_SERVER:
+                        server = 1;
+                        break;
+                case OPT_CONFIG:
+                        config_path = optarg;
+                        break;
+                case OPT_NO_CONFIG:
+                        no_config = 1;
+                        break;
+                case 'h':
+                case ':':
+                case '?':
+                        parse_options(argc, argv, 0);
+                        break;
+                }
+        }
+        return server;
+}
+
+/* The config file to read, or NULL with --no-config. */
+static char *config_file(void)
+{
+        if (no_config) {
+                return NULL;
+        }
+        if (config_path) {
+                return xstrdup(config_path);
+        }
+        return config_default_path();
+}
+
+/* DEST from the sync line for src. */
+static char *find_dest(const char *src)
+{
+        char *path = config_file();
+        char *dst;
+
+        if (!path) {
+                die("no DEST given, and --no-config");
+        }
+        dst = config_dest(path, src);
+        free(path);
+        config_dest_used = 1;
+        return dst;
+}
+
+/* Parse the options from the config file for a copy of src to dst. */
+static void read_config(const char *src, const char *dst)
+{
+        char *path = config_file();
+
+        if (!path) {
+                return;
+        }
+        config_read(path, config_path != NULL, src, dst, &config_argc,
+                    &config_argv);
+        free(path);
+        parse_options(config_argc, config_argv, 1);
+}
+
+static void show_config(const char *dst)
+{
+        int i;
+
+        if (opt_quiet || !config_argv) {
+                return;
+        }
+        if (config_dest_used) {
+                printf("erasync: DEST %s from %s\n", dst, config_argv[0]);
+        }
+        if (config_argc < 2) {
+                return;
+        }
+        printf("erasync: options from %s:", config_argv[0]);
+        for (i = 1; i < config_argc; i++) {
+                printf(" %s", config_argv[i]);
+        }
+        printf("\n");
 }
 
 static void catch_signals(void)
@@ -244,8 +409,20 @@ int main(int argc, char **argv)
 {
         int server;
         int operands;
+        char *dst = NULL;
 
-        server = parse_options(argc, argv);
+        server = scan_options(argc, argv);
+        operands = argc - optind;
+        if (!server && operands == 1) {
+                dst = find_dest(argv[optind]);
+        }
+        if (!server && operands == 2) {
+                dst = xstrdup(argv[optind + 1]);
+        }
+        if (dst) {
+                read_config(argv[optind], dst);
+        }
+        server = parse_options(argc, argv, 0);
         operands = argc - optind;
 
         catch_signals();
@@ -257,8 +434,9 @@ int main(int argc, char **argv)
                 }
                 return run_server();
         }
-        if (operands != 2) {
+        if (!dst) {
                 usage(2);
         }
-        return run_sync(argv[optind], argv[optind + 1]);
+        show_config(dst);
+        return run_sync(argv[optind], dst);
 }

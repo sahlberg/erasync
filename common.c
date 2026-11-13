@@ -123,6 +123,14 @@ void err_rel(const char *rel, const char *fmt, ...)
         progress_show();
 }
 
+static int is_estimate(const char *detail)
+{
+        size_t n = strlen(detail);
+        size_t e = strlen(ESTIMATE);
+
+        return n >= e && !strcmp(detail + n - e, ESTIMATE);
+}
+
 void report_action(int action, const char *rel, const char *detail)
 {
         static const char *verbs[] = {
@@ -167,7 +175,9 @@ void report_action(int action, const char *rel, const char *detail)
                 return;
         }
         progress_hide();
-        if (detail && opt_verbose) {
+        if (detail && is_estimate(detail)) {
+                printf("%s %s\n        %s\n", verbs[action], show, detail);
+        } else if (detail && opt_verbose) {
                 printf("%s %s (%s)\n", verbs[action], show, detail);
         } else {
                 printf("%s %s\n", verbs[action], show);

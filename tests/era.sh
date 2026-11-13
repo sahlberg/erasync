@@ -32,6 +32,9 @@ for tool in dmsetup losetup mkfs.ext4 era_invalidate; do
 done
 
 W=$(mktemp -d /tmp/erasync-era.XXXXXX)
+# Keep a real ~/.config/erasync/config out of the tests.
+export HOME=$W
+unset XDG_CONFIG_HOME
 NAME=erasync-test-$$
 LOOPS=
 

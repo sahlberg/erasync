@@ -16,12 +16,12 @@ BIN = ROOT / "erasync"
 RSH = Path(__file__).resolve().parent / "rsh-local"
 
 
-def run(args, check=True):
+def run(args, check=True, cwd=None):
     # A file written within a second of the era snapshot is looked at
     # again by the next run. Let the writes of the test settle first.
     time.sleep(1.2)
     cmd = [str(BIN), "-e", str(RSH), "--remote-path", str(BIN), *args]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
     if check and proc.returncode != 0:
         sys.stderr.write(proc.stdout)
         sys.stderr.write(proc.stderr)
@@ -99,6 +99,46 @@ def check_exclude(root, sync):
         raise SystemExit("--delete removed an excluded directory")
     if (dst / "vm" / "gone.qcow2").exists():
         raise SystemExit("--delete kept a file that is not excluded")
+
+
+def check_config(root):
+    """A sync block in the config file applies to that copy only.
+
+    A relative local SRC matches the absolute path in the config, and
+    without DEST the one from the sync line is used.
+    """
+    src = root / "cfg-src"
+    dst = root / "cfg-dst"
+    other = root / "cfg-other"
+    src.mkdir()
+    (src / "a-tester.qcow2").write_text("tester")
+    (src / "keep").write_text("keep")
+    config = root / "config"
+    config.write_text(f"# test\nsync {src}/ local:{dst}\n"
+                      "\t--exclude *-tester*.qcow2\n")
+
+    out = run(["--config", str(config), "cfg-src", f"local:{dst}"],
+              cwd=root)
+    if "--exclude=*-tester*.qcow2" not in out.stdout:
+        raise SystemExit("config options were not shown:\n" + out.stdout)
+    if (dst / "a-tester.qcow2").exists() or read(dst / "keep") != b"keep":
+        raise SystemExit("config exclude was not applied")
+
+    (src / "new").write_text("new")
+    out = run(["--config", str(config), str(src)])
+    if f"DEST local:{dst} from" not in out.stdout:
+        raise SystemExit("DEST from config was not shown:\n" + out.stdout)
+    if read(dst / "new") != b"new" or (dst / "a-tester.qcow2").exists():
+        raise SystemExit("copy to the DEST from config failed")
+    run(["--config", str(config), str(src), f"local:{other}"])
+    if read(other / "a-tester.qcow2") != b"tester":
+        raise SystemExit("config exclude applied to another copy")
+
+    config.write_text("--exclude='*.qcow2'\n")
+    quoted = run(["--config", str(config), str(src), f"local:{dst}"],
+                 check=False)
+    if quoted.returncode != 2 or "quotes" not in quoted.stderr:
+        raise SystemExit(f"quoted config: {quoted.returncode} {quoted.stderr}")
 
 
 def main():
@@ -275,6 +315,19 @@ def main():
             raise SystemExit("dry-run touched an unchanged file")
         if "update a file" not in dry.stdout or "dry-run:" not in dry.stdout:
             raise SystemExit(dry.stdout + dry.stderr)
+        if not re.search(r"update a file\n +up to \S+ \(estimate\)\n", dry.stdout):
+            raise SystemExit("dry-run estimate missing:\n" + dry.stdout)
+        if not re.search(r"up to [1-9]\S* to copy \(estimate\)$", dry.stdout):
+            raise SystemExit("dry-run summary estimate missing:\n" + dry.stdout)
+        # A pull estimates on the server: the lines come through, the sum
+        # in the summary does not.
+        dry_pull = run(["-n", f"local:{src}", str(pull_dst)])
+        if read(pull_dst / "a file") == b"dry\n":
+            raise SystemExit("dry-run pull wrote a file")
+        if not re.search(r"update a file\n +up to \S+ \(estimate\)\n", dry_pull.stdout):
+            raise SystemExit("dry-run pull estimate missing:\n" + dry_pull.stdout)
+        if "copied 0 bytes" not in dry_pull.stdout:
+            raise SystemExit("dry-run pull summary:\n" + dry_pull.stdout)
         if (root / "dry-missing").exists():
             raise SystemExit("dry-run created a directory")
         dry_new = run(["-n", str(src), f"local:{root / 'dry-missing'}"])
@@ -282,6 +335,8 @@ def main():
             raise SystemExit("dry-run created the destination")
         if "create " not in dry_new.stdout:
             raise SystemExit(dry_new.stdout)
+        if not re.search(r"\n +\S+, new file \(estimate\)\n", dry_new.stdout):
+            raise SystemExit("dry-run create estimate missing:\n" + dry_new.stdout)
 
         slash = run([str(one), f"local:{root / 'missing-dir'}/"], check=False)
         if slash.returncode != 2 or "not a directory" not in slash.stderr:
@@ -302,6 +357,7 @@ def main():
         pull = root / "pull-ex"
         pull.mkdir()
         check_exclude(pull, lambda args, s, d: run([*args, f"local:{s}", str(d)]))
+        check_config(root)
 
     print("ok")
 

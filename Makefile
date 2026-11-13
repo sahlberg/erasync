@@ -5,7 +5,7 @@ PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 MANDIR ?= $(PREFIX)/share/man
 SRCS = main.c sync.c sender.c receiver.c era.c dm.c record.c ranges.c \
-       common.c fsutil.c proto.c remote.c
+       common.c fsutil.c proto.c remote.c config.c
 OBJS = $(SRCS:.c=.o)
 
 .PHONY: all check install uninstall clean

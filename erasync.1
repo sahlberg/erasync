@@ -5,7 +5,8 @@ erasync \- copy files and trees, using dm-era to find what changed
 .SH SYNOPSIS
 .B erasync
 .RI [ options ]
-.I SRC DEST
+.I SRC
+.RI [ DEST ]
 .SH DESCRIPTION
 .B erasync
 makes
@@ -77,6 +78,16 @@ are unfinished copies and are removed.
 Show what would be done, without writing anything or taking era
 snapshots.
 Files are compared by size and mtime only.
+Below each file to create or update is an estimate of the bytes to copy,
+marked
+.BR (estimate) .
+It is the allocated size of the source file for a whole-file copy.
+When the destination has an era record, only dm-era knows which blocks
+changed, so the estimate is
+.BI "up to " size\fR:
+the real copy is often much smaller.
+When the source is local, the summary line ends with the sum of the
+estimates.
 .TP
 .BR \-v ", " \-\-verbose
 Also show unchanged files, and how each file was copied: the bytes sent,
@@ -137,6 +148,18 @@ The default is
 on the remote
 .BR PATH .
 .TP
+.BI \-\-config " FILE"
+Read options from
+.I FILE
+instead of the default config file; see
+.BR "CONFIG FILE" .
+It is an error if
+.I FILE
+does not exist.
+.TP
+.B \-\-no\-config
+Do not read a config file.
+.TP
 .B \-\-server
 Speak the copy protocol on standard input and output.
 This is what the remote side runs; it is not meant to be used directly.
@@ -190,6 +213,124 @@ expand it:
 .B \-\-exclude='*\-tester*.qcow2'
 or
 .BR \-\-exclude=\e*\-tester\e*.qcow2 .
+.SH CONFIG FILE
+.B ~/.config/erasync/config
+holds options so that they need not be typed on every run.
+When
+.B XDG_CONFIG_HOME
+is set, the file is
+.B $XDG_CONFIG_HOME/erasync/config
+instead.
+A missing file is not an error.
+Options before the first
+.B sync
+line apply to every copy.
+A line
+.PP
+.RS
+.BI sync " SRC DEST"
+.RE
+.PP
+starts options that apply only to a copy of that
+.I SRC
+to that
+.IR DEST ,
+up to the next
+.B sync
+line.
+A local
+.I SRC
+or
+.I DEST
+matches when it names the same path, after it is made absolute and its
+symlinks are resolved:
+.B sync /vm/images ...\&
+also matches
+.B images
+run in
+.IR /vm .
+A remote
+.IB HOST : PATH
+must be written the same way as on the command line.
+Trailing slashes are ignored.
+The names may not contain spaces.
+.PP
+When
+.I DEST
+is not given, the
+.I DEST
+of the
+.B sync
+lines for
+.I SRC
+is used.
+It is an error when there is no such line, or when they name more than
+one
+.IR DEST .
+.PP
+Each line holds one option, written as on the command line.
+An option and its argument are separated by
+.B =
+or by spaces.
+There is no shell quoting, so a pattern is written as it is, and a line
+with a quote is refused.
+Blank lines and lines starting with
+.B #
+are ignored.
+.BR \-\-server ,
+.BR \-\-config ,
+.B \-\-no\-config
+and
+.B \-\-help
+are not allowed.
+.PP
+The options from the file are read before those on the command line.
+Patterns add up, a later
+.B \-v
+or
+.B \-q
+replaces an earlier one, and a later
+.B \-\-rsh
+or
+.B \-\-remote\-path
+wins.
+Other options, such as
+.BR \-\-delete ,
+cannot be turned off again on the command line; use
+.B \-\-no\-config
+for that.
+Unless
+.B \-q
+is given, a
+.I DEST
+and the options taken from the file are shown.
+.PP
+For example:
+.PP
+.RS
+.nf
+# Every copy
+\-\-verbose
+
+sync /vm/images backup.example.com:/backup/images
+        \-\-exclude *\-tester*.qcow2
+        \-\-delete
+.fi
+.RE
+.PP
+With this file,
+.B erasync /vm/images
+copies to
+.IR backup.example.com:/backup/images .
+.PP
+The file is read by the local
+.B erasync
+only, not by the one on a remote host.
+Since
+.B erasync
+runs as root,
+.B ~
+is usually root's home directory.
 .SH REMOTE COPIES
 Either
 .I SRC
@@ -232,6 +373,10 @@ A dm-era device allows one metadata snapshot at a time.
 Runs that use the same device wait for each other, for up to ten
 minutes.
 .SH FILES
+.TP
+.B ~/.config/erasync/config
+Options to use without typing them; see
+.BR "CONFIG FILE" .
 .TP
 .B user.erasync.era
 An extended attribute on each destination file.

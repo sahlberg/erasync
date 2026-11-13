@@ -46,7 +46,7 @@ PATH, unless --remote-path names another one.
 
 ```
 erasync [-v] [-n] [--delete] [--exclude PATTERN]... [--force[=PATTERN]]...
-        SRC DEST
+        SRC [DEST]
 ```
 
 -v prints each file. -n prints the actions and writes nothing. --delete
@@ -65,6 +65,28 @@ erasync --exclude='*-tester*.qcow2' /vm/images /backup/images
 erasync --force='*-base*.qcow2' /vm/images /backup/images
 ```
 
+## Config file
+
+Options that should be used on every run can go in
+~/.config/erasync/config instead of on the command line. Options before the first `sync` line
+apply to every copy; the ones after a `sync SRC DEST` line apply only to
+a copy of that SRC to that DEST. One option per line, without shell
+quotes:
+
+```
+--verbose
+
+sync /vm/images 10.10.10.11:/backup/images
+        --exclude *-tester*.qcow2
+```
+
+Given only SRC, erasync copies to the DEST of the sync line for that
+SRC: `erasync /vm/images` above. erasync prints the DEST and the
+options it took from the file, unless -q is given.
+
+`--config FILE` reads another file, and `--no-config` none. See
+erasync(1) for the details.
+
 ## Design
 
 A copy has a sender, which walks the source tree and decides what each
@@ -81,6 +103,7 @@ The sources:
 - receiver.c: everything that changes the destination
 - sync.c: a local copy
 - remote.c, proto.c: a remote copy and its frames
+- config.c: ~/.config/erasync/config
 - era.c: dm-era devices, snapshots and dirty blocks
 - record.c: the user.erasync.era xattr, starting with "v1 "
 - dm.c: device-mapper tables and messages
