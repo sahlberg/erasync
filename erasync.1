@@ -32,6 +32,10 @@ asks dm-era instead.
 A regular file on a dm-era device is updated from the blocks written
 since the era recorded on the destination, plus any blocks written on
 the destination itself when it is also on dm-era.
+Blocks written on the destination are looked for only in a file whose
+mtime is newer than its era record, which any ordinary write causes;
+.B \-\-check\-dest
+looks in every file.
 The first copy of a file is the whole file.
 Later copies read and write only the blocks that changed.
 .PP
@@ -132,6 +136,20 @@ The pattern needs the
 followed by a separate word means a plain
 .BR \-\-force .
 May be given more than once.
+.TP
+.B \-\-check\-dest
+Ask dm-era about every destination file that has an era record, and
+copy back from the source any blocks written on the destination since.
+Without it, only a file whose mtime is newer than its era record is
+checked, so a write that also sets the mtime back, such as with
+.B touch \-r
+or
+.BR "rsync \-t" ,
+is missed.
+The check takes a metadata snapshot of the destination device on every
+run, and each snapshot starts a new era there.
+With this option, records of unchanged files are also moved up to the
+newest era in use, so that one snapshot answers for all of them.
 .TP
 .BR \-e ", " \-\-rsh " \fICMD\fR"
 The remote shell to run instead of

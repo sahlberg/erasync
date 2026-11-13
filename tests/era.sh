@@ -113,6 +113,16 @@ expect_output() {
         fi
 }
 
+# The number of snapshots taken on the destination device.
+expect_snapshots() {
+        local n
+
+        n=$(grep -c -- "-dst: snapshot" "$W/out")
+        if [ "$n" != "$1" ]; then
+                fail "$n destination snapshots, expected $1"
+        fi
+}
+
 write_at() {
         dd if=/dev/urandom of="$1" bs=4K count=1 seek=$(($2 / 4096)) \
                 conv=notrunc status=none
@@ -187,6 +197,8 @@ for MODE in $MODES; do
         STEP="no change"
         run_sync
         expect_copied 0 0
+        # Every mtime is older than its record: nothing to check.
+        expect_snapshots 0
 
         STEP="source write"
         write_at "$W/src/big.img" $((10 * M))
@@ -245,6 +257,42 @@ for MODE in $MODES; do
         STEP="after forcing"
         run_sync
         expect_copied 0 0
+
+        # big.img now has a newer destination era than the other files.
+        # With --check-dest, one snapshot reads the bitmaps of both eras,
+        # and the others are moved up to the newer one.
+        STEP="copy one file"
+        write_at "$W/src/big.img" $((50 * M))
+        run_sync
+        expect_copied 1 $((128 * 1024))
+
+        STEP="two destination eras"
+        run_sync --check-dest
+        expect_copied 0 0
+        expect_snapshots 1
+        expect_output "moved 3 destination records"
+
+        STEP="one destination era"
+        run_sync --check-dest
+        expect_copied 0 0
+        expect_snapshots 1
+        if grep -q "moved .* destination records" "$W/out"; then
+                fail "records were moved again"
+        fi
+
+        STEP="destination write after a move"
+        write_at "$W/dst/sparse.img" $((35 * M))
+        run_sync
+        expect_copied 1 $((128 * 1024))
+        expect_output "destination was written after its recorded era"
+
+        # A write that sets the mtime back is only found by --check-dest.
+        STEP="destination write with the mtime set back"
+        write_at "$W/dst/big.img" $((5 * M))
+        touch -r "$W/src/big.img" "$W/dst/big.img"
+        run_sync --check-dest
+        expect_copied 1 $((128 * 1024))
+        expect_output "destination was written after its recorded era"
 
         if [ $FAILED = 0 ]; then
                 echo "era.sh: $MODE ok"

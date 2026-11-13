@@ -32,7 +32,9 @@ static const char help_text[] =
         "the whole file. Later copies read and write only blocks dm-era has\n"
         "seen change, plus blocks written on a destination that is itself on\n"
         "dm-era. A matching size and mtime skips that check, except when the\n"
-        "destination era shows a later write.\n"
+        "destination era shows a later write. The destination era is only\n"
+        "checked for a file whose mtime is newer than its era record, unless\n"
+        "--check-dest is given.\n"
         "\n"
         "SRC and DEST must both be on dm-era devices; use cp or rsync for\n"
         "anything else. erasync must run as root, and needs era_invalidate\n"
@@ -58,6 +60,9 @@ static const char help_text[] =
         "                  copy files whole instead of the changed blocks:\n"
         "                  all of them, or those that match PATTERN. Note the\n"
         "                  '='. May be given more than once.\n"
+        "      --check-dest\n"
+        "                  check every DEST file with dm-era for writes,\n"
+        "                  not only those whose mtime changed\n"
         "  -e, --rsh CMD   remote shell to run instead of ssh\n"
         "      --remote-path PROG\n"
         "                  erasync on the remote host (default: erasync)\n"
@@ -96,6 +101,7 @@ enum {
         OPT_FORCE,
         OPT_CONFIG,
         OPT_NO_CONFIG,
+        OPT_CHECK_DEST,
 };
 
 static const struct option long_options[] = {
@@ -111,6 +117,7 @@ static const struct option long_options[] = {
         { "force",       optional_argument, NULL, OPT_FORCE },
         { "config",      required_argument, NULL, OPT_CONFIG },
         { "no-config",   no_argument,       NULL, OPT_NO_CONFIG },
+        { "check-dest",  no_argument,       NULL, OPT_CHECK_DEST },
         { NULL, 0, NULL, 0 }
 };
 
@@ -216,6 +223,9 @@ static int parse_options(int argc, char **argv, int in_config)
                         } else {
                                 opt_force_all = 1;
                         }
+                        break;
+                case OPT_CHECK_DEST:
+                        opt_check_dest = 1;
                         break;
                 case OPT_CONFIG:
                 case OPT_NO_CONFIG:

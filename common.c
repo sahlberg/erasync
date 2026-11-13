@@ -40,6 +40,7 @@ static void progress_show(void);
 struct patterns opt_excludes;
 struct patterns opt_forces;
 int opt_force_all;
+int opt_check_dest;
 
 void patterns_add(struct patterns *list, const char *text)
 {

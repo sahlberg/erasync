@@ -20,6 +20,8 @@ parts of the files are modified and needs to be synced.
 
 First copy is always the entire file but later copies are just the blocks
 that have changed.
+Blocks written on the destination since the last copy are copied back
+too: in files whose mtime moved, or in every file with --check-dest.
 
 erasync copies a directory SRC into a directory DEST, or a single file.
 A file is written to DEST, or into DEST when DEST is a directory.

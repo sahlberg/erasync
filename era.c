@@ -35,6 +35,8 @@
 #define MAX_DEVS 64
 #define MAX_ERAS 64
 #define MAX_BITMAPS 32
+/* Recent log eras whose bitmaps are read from the same snapshot. */
+#define PREREAD_ERAS 4
 #define MAX_DEPTH 16
 #define FIEMAP_EXTENTS 256
 
@@ -95,11 +97,12 @@ static pid_t child_pid;
  *
  * 5. Update the destination record.
  *    Replace it on every copied file, and store it on every skipped or
- *    metadata-only file that had no destination record. A file that
- *    already has one and was not copied is left unchanged. The first
- *    such file on a destination device advances that dm-era device to
- *    the next era, and that new era is the record written to those
- *    files.
+ *    metadata-only file that had no destination record. The first such
+ *    file on a destination device advances that dm-era device to the
+ *    next era, and that new era is the record written to those files.
+ *    A file that already has one and was not copied keeps it, moved up
+ *    to the newest destination record of the run on that device when it
+ *    is older (see refreshes), without a new era.
  *
  * A file with no era is treated as a file where every byte has changed.
  */
@@ -132,7 +135,10 @@ static int mtime_is_ok(const struct stat *st, double snap_time)
  *
  * Files on the same device can have different reference eras, so one
  * device can hold several bitmaps. Each is read once per run and shared
- * by every file with that reference era.
+ * by every file with that reference era. The snapshot that reads the
+ * first one also reads the bitmaps of the most recent eras in the log,
+ * which are the reference eras files are likely to have, so a run
+ * usually needs one snapshot per device to check them all.
  */
 struct era_bitmap {
         uint64_t since_era;
@@ -160,6 +166,11 @@ struct era_dev {
         int log_fd;
         char last_stamp[80];
         double last_snap_time;
+        /* The era started by the first snapshot of this run. */
+        uint64_t first_era;
+        /* The newest valid destination record seen in this run. */
+        char newest_dest[80];
+        uint64_t newest_dest_era;
         /* era_finish has advanced this destination device. */
         int dest_era_advanced;
         int n_bitmaps;
@@ -738,12 +749,12 @@ void era_set_context(const char *rel, unsigned long long file_size)
         era_ctx_size = file_size;
 }
 
-/* Tell the user which file caused the next snapshot. */
+/* With -v, tell the user which file caused the next snapshot. */
 static void print_context(struct era_dev *e)
 {
         char size[32];
 
-        if (opt_quiet || !era_ctx) {
+        if (!opt_verbose || !era_ctx) {
                 return;
         }
         if (era_ctx_size == 0) {
@@ -773,6 +784,76 @@ static void log_append(struct era_dev *e, const char *stamp)
         }
 }
 
+/* Up to n of the most recent eras in the log of e, newest last. */
+static int log_recent_eras(struct era_dev *e, uint64_t *eras, int n)
+{
+        char line[128];
+        int count = 0;
+        FILE *f;
+
+        f = fopen(e->log_path, "r");
+        if (!f) {
+                return 0;
+        }
+        while (fgets(line, sizeof line, f)) {
+                if (count == n) {
+                        memmove(eras, eras + 1, (n - 1) * sizeof *eras);
+                        count--;
+                }
+                eras[count++] = strtoull(line, NULL, 10);
+        }
+        fclose(f);
+        return count;
+}
+
+static int have_bitmap(const struct era_dev *e, uint64_t since)
+{
+        int i;
+
+        for (i = 0; i < e->n_bitmaps; i++) {
+                if (e->bitmaps[i].since_era == since) {
+                        return 1;
+                }
+        }
+        return 0;
+}
+
+/*
+ * While the snapshot that read first is held, also read the bitmaps of
+ * the recent eras in the log that are older than era, the one the
+ * snapshot started. Returns how many were read.
+ */
+static int preread_bitmaps(struct era_dev *e, const struct era_bitmap *first,
+                           uint32_t era)
+{
+        uint64_t recent[PREREAD_ERAS + 1];
+        struct era_bitmap *bm;
+        int read = 0;
+        int n;
+        int i;
+
+        n = log_recent_eras(e, recent, PREREAD_ERAS + 1);
+        for (i = n - 1; i >= 0; i--) {
+                if (e->n_bitmaps == MAX_BITMAPS) {
+                        break;
+                }
+                if (recent[i] == 0 || recent[i] >= era ||
+                    have_bitmap(e, recent[i])) {
+                        continue;
+                }
+                bm = &e->bitmaps[e->n_bitmaps];
+                bm->since_era = recent[i];
+                bm->snap_time = first->snap_time;
+                snprintf(bm->new_stamp, sizeof bm->new_stamp, "%s",
+                         first->new_stamp);
+                bm->bits = xmalloc(bitmap_words(e) * sizeof *bm->bits);
+                read_dirty_blocks(e, bm, recent[i]);
+                e->n_bitmaps++;
+                read++;
+        }
+        return read;
+}
+
 /*
  * Advance e to the next era: syncfs, take the metadata snapshot and log
  * the new era. When since is not 0, also read the blocks written in or
@@ -786,6 +867,7 @@ static struct era_bitmap *era_advance(struct era_dev *e, int fd,
         double snap_time;
         uint32_t era;
         char stamp[80];
+        int more = 0;
         int n;
 
         if (erasync_stop) {
@@ -813,6 +895,9 @@ static struct era_bitmap *era_advance(struct era_dev *e, int fd,
         log_append(e, stamp);
         snprintf(e->last_stamp, sizeof e->last_stamp, "%s", stamp);
         e->last_snap_time = snap_time;
+        if (!e->first_era) {
+                e->first_era = era;
+        }
 
         if (bm) {
                 bm->since_era = since;
@@ -821,13 +906,18 @@ static struct era_bitmap *era_advance(struct era_dev *e, int fd,
                 bm->bits = xmalloc(bitmap_words(e) * sizeof *bm->bits);
                 read_dirty_blocks(e, bm, since);
                 e->n_bitmaps++;
+                more = preread_bitmaps(e, bm, era);
         }
         snap_drop();
         era_unlock(e);
 
-        if (opt_verbose) {
-                fprintf(stderr, "erasync: %s: snapshot, now era %u%s\n",
-                        e->id, era, bm ? ", read dirty blocks" : "");
+        if (opt_verbose && bm) {
+                fprintf(stderr, "erasync: %s: snapshot, now era %u, read "
+                        "dirty blocks since era %" PRIu64 " and %d recent "
+                        "eras\n", e->id, era, since, more);
+        } else if (opt_verbose) {
+                fprintf(stderr, "erasync: %s: snapshot, now era %u\n",
+                        e->id, era);
         }
         return bm;
 }
@@ -1040,6 +1130,24 @@ void era_state_for_copy(int fd, const struct stat *st, char *state_out,
         }
 }
 
+/*
+ * Whether the mtime of st is older than the time in stamp, "<era> <time>".
+ * erasync leaves a file it wrote with an older mtime than its destination
+ * record, which is taken after the write, and a later write sets the mtime
+ * to the time of that write. A write that sets the mtime back is missed:
+ * --check-dest finds that one too.
+ */
+static int mtime_before_stamp(const struct stat *st, const char *stamp)
+{
+        double mtime = st->st_mtim.tv_sec + st->st_mtim.tv_nsec / 1e9;
+        const char *t = strchr(stamp, ' ');
+
+        if (!t) {
+                return 0;
+        }
+        return mtime < strtod(t + 1, NULL);
+}
+
 /* Mark the whole destination file as changed and tell the user why. */
 static void dest_all_dirty(struct era_ranges *dirty, const struct stat *st,
                            const char *path, const char *why)
@@ -1060,6 +1168,7 @@ void era_dest_ranges(int fd, const struct stat *st, const char *path,
         struct era_dev *e;
         struct era_bitmap *bm;
         const char *why;
+        uint64_t since;
 
         dirty->n = 0;
         if (!S_ISREG(st->st_mode)) {
@@ -1089,7 +1198,15 @@ void era_dest_ranges(int fd, const struct stat *st, const char *path,
                                "destination era is not in the era log");
                 return;
         }
-        bm = get_bitmap(e, fd, strtoull(stamp, NULL, 10));
+        since = strtoull(stamp, NULL, 10);
+        if (since > e->newest_dest_era) {
+                e->newest_dest_era = since;
+                snprintf(e->newest_dest, sizeof e->newest_dest, "%s", stamp);
+        }
+        if (!opt_check_dest && mtime_before_stamp(st, stamp)) {
+                return;
+        }
+        bm = get_bitmap(e, fd, since);
         if (!bm) {
                 dest_all_dirty(dirty, st, path, "too many destination eras");
                 return;
@@ -1110,43 +1227,69 @@ void era_dest_ranges(int fd, const struct stat *st, const char *path,
 }
 
 /*
- * Files that need a destination record once the sync has completed.
+ * Files whose destination record era_finish writes.
  *
- * era_note keeps track of a file whose content was updated.
- * state is the source record already stored on that file.
+ * notes: files that need a new destination record. era_note keeps track
+ * of a file whose content was updated, and era_arm of one that was not
+ * updated and has no destination record yet. state is the source record
+ * on the file. They all get the era that era_finish advances to.
  *
- * era_arm keeps track of a file whose content was not updated.
- * The file was skipped, or only its mode, owner, and modification
- * time changed. It is tracked only when it still has no destination
- * record.
- *
- * era_finish writes the destination record on each file here.
+ * refreshes: files that were not updated and have a destination record,
+ * so with --check-dest the check found no write on the destination since
+ * that era. When
+ * the era is older than the newest valid destination record of the run
+ * on that device, era_finish moves it up to that one, so the files of a
+ * tree share few eras and the next run needs few bitmaps. Writes in
+ * between were checked by this run, and later writes are in an era after
+ * this run's first snapshot, which is after the newest record.
  */
 struct era_note {
         char *path;
         char *state;
         dev_t dev;
+        /* The era of the destination record, for a refresh. */
+        uint64_t dest_era;
 };
 
-static struct era_note *notes;
-static int n_notes;
-static int alloc_notes;
+struct note_list {
+        struct era_note *v;
+        int n;
+        int alloc;
+};
 
-static void note_add(const char *path, dev_t dev, const char *state)
+static struct note_list notes;
+static struct note_list refreshes;
+
+static void note_add(struct note_list *list, const char *path, dev_t dev,
+                     const char *state, uint64_t dest_era)
 {
         struct era_note *note;
 
         if (!state || !state[0]) {
                 return;
         }
-        if (n_notes == alloc_notes) {
-                alloc_notes = alloc_notes ? alloc_notes * 2 : 64;
-                notes = xrealloc(notes, (size_t)alloc_notes * sizeof *notes);
+        if (list->n == list->alloc) {
+                list->alloc = list->alloc ? list->alloc * 2 : 64;
+                list->v = xrealloc(list->v,
+                                   (size_t)list->alloc * sizeof *list->v);
         }
-        note = &notes[n_notes++];
+        note = &list->v[list->n++];
         note->path = xstrdup(path);
         note->state = xstrdup(state);
         note->dev = dev;
+        note->dest_era = dest_era;
+}
+
+static void note_list_free(struct note_list *list)
+{
+        int i;
+
+        for (i = 0; i < list->n; i++) {
+                free(list->v[i].path);
+                free(list->v[i].state);
+        }
+        free(list->v);
+        memset(list, 0, sizeof *list);
 }
 
 /*
@@ -1154,16 +1297,47 @@ static void note_add(const char *path, dev_t dev, const char *state)
  */
 void era_note(const char *path, const struct stat *st, const char *state)
 {
-        note_add(path, st->st_dev, state);
+        note_add(&notes, path, st->st_dev, state, 0);
+}
+
+/*
+ * Split state into its source record and the era of its destination
+ * record, which must be on e. Returns whether it has both.
+ */
+static int split_dest(const char *state, const struct era_dev *e,
+                      char *source, size_t source_sz, uint64_t *dest_era)
+{
+        const char *p = state;
+        unsigned long long era;
+        char id[300];
+        size_t len;
+
+        if (record_parse(&p, NULL, NULL, 0, NULL, 0) != 1) {
+                return 0;
+        }
+        len = (size_t)(p - state);
+        if (len >= source_sz) {
+                return 0;
+        }
+        memcpy(source, state, len);
+        source[len] = '\0';
+        if (record_parse(&p, &era, NULL, 0, id, sizeof id) != 1) {
+                return 0;
+        }
+        *dest_era = era;
+        return strcmp(id, e->id) == 0;
 }
 
 /*
  * Content was not updated. Keep track of path when it still has no
- * destination record.
+ * destination record, or for a refresh when it has one.
  */
 void era_arm(int fd, const char *path, const struct stat *st)
 {
         char state[ERA_STATE_MAX];
+        char source[ERA_STATE_MAX];
+        struct era_dev *e;
+        uint64_t dest_era;
 
         if (!S_ISREG(st->st_mode)) {
                 return;
@@ -1171,13 +1345,17 @@ void era_arm(int fd, const char *path, const struct stat *st)
         if (era_get_xattr(fd, state, sizeof state) < 0) {
                 return;
         }
-        if (!record_source_only(state)) {
+        e = era_for_dev(st->st_dev, NULL);
+        if (!e) {
                 return;
         }
-        if (!era_for_dev(st->st_dev, NULL)) {
+        if (record_source_only(state)) {
+                note_add(&notes, path, st->st_dev, state, 0);
                 return;
         }
-        note_add(path, st->st_dev, state);
+        if (split_dest(state, e, source, sizeof source, &dest_era)) {
+                note_add(&refreshes, path, st->st_dev, source, dest_era);
+        }
 }
 
 static int open_noted(const struct era_note *note)
@@ -1192,26 +1370,60 @@ static int open_noted(const struct era_note *note)
         return fd;
 }
 
-/* Append the destination record of e to the source record of note. */
+/*
+ * Append the destination record stamp of e to the source record of note.
+ * A new record is synced. A refresh is not: if it is lost, the older
+ * record it replaced is still correct.
+ */
 static void write_dest_record(const struct era_note *note,
-                              const struct era_dev *e)
+                              const struct era_dev *e, const char *stamp,
+                              int sync)
 {
         char state[ERA_STATE_MAX];
         int fd;
         int n;
 
         n = snprintf(state, sizeof state, "%s %s %s",
-                     note->state, e->last_stamp, e->id);
+                     note->state, stamp, e->id);
         if (n < 0 || n >= (int)sizeof state) {
                 die("destination era state for %s is too long",
                           note->path);
         }
         fd = open_noted(note);
         record_store(fd, note->path, state);
-        if (fsync(fd) < 0) {
+        if (sync && fsync(fd) < 0) {
                 die("fsync %s: %s", note->path, strerror(errno));
         }
         close(fd);
+}
+
+/* Move the records of refreshes up to the newest one on their device. */
+static void refresh_records(void)
+{
+        const struct era_note *note;
+        struct era_dev *e;
+        int moved = 0;
+        int i;
+
+        /* Without --check-dest, a file may not have been checked. */
+        if (!opt_check_dest) {
+                return;
+        }
+        for (i = 0; i < refreshes.n; i++) {
+                note = &refreshes.v[i];
+                e = era_for_dev(note->dev, NULL);
+                if (!e || !e->first_era ||
+                    e->newest_dest_era >= e->first_era ||
+                    note->dest_era >= e->newest_dest_era) {
+                        continue;
+                }
+                write_dest_record(note, e, e->newest_dest, 0);
+                moved++;
+        }
+        if (moved && opt_verbose) {
+                fprintf(stderr, "erasync: moved %d destination records to "
+                        "the newest era\n", moved);
+        }
 }
 
 void era_finish(void)
@@ -1223,12 +1435,12 @@ void era_finish(void)
         era_set_context(NULL, 0);
 
         /* Advance each destination device once, to the era for the records */
-        for (i = 0; i < n_notes; i++) {
-                e = era_for_dev(notes[i].dev, NULL);
+        for (i = 0; i < notes.n; i++) {
+                e = era_for_dev(notes.v[i].dev, NULL);
                 if (!e || e->dest_era_advanced) {
                         continue;
                 }
-                fd = open_noted(&notes[i]);
+                fd = open_noted(&notes.v[i]);
                 era_advance(e, fd, 0);
                 close(fd);
                 e->dest_era_advanced = 1;
@@ -1238,22 +1450,17 @@ void era_finish(void)
                 }
         }
 
-        for (i = 0; i < n_notes; i++) {
-                e = era_for_dev(notes[i].dev, NULL);
+        for (i = 0; i < notes.n; i++) {
+                e = era_for_dev(notes.v[i].dev, NULL);
                 if (!e) {
                         continue;
                 }
-                write_dest_record(&notes[i], e);
+                write_dest_record(&notes.v[i], e, e->last_stamp, 1);
         }
+        refresh_records();
 
-        for (i = 0; i < n_notes; i++) {
-                free(notes[i].path);
-                free(notes[i].state);
-        }
-        free(notes);
-        notes = NULL;
-        n_notes = 0;
-        alloc_notes = 0;
+        note_list_free(&notes);
+        note_list_free(&refreshes);
 }
 
 

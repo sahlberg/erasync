@@ -61,6 +61,8 @@ enum {
         F_VERBOSE = 8,
         F_QUIET = 16,
         F_FORCE_ALL = 32,
+        /* An older server ignores it, and checks every file anyway. */
+        F_CHECK_DEST = 64,
         /* Ranges that fit in a STATE. More than this copies the file. */
         MAX_RANGES = (4 * 1024 * 1024) / 16,
         MAX_NAMES = 1000000,
@@ -1101,6 +1103,9 @@ static int client_hello(struct peer *p, int server_sends,
         if (opt_force_all) {
                 flags |= F_FORCE_ALL;
         }
+        if (opt_check_dest) {
+                flags |= F_CHECK_DEST;
+        }
         buf_u32(&b, PROTO_VERSION);
         buf_u32(&b, flags);
         buf_str(&b, remote_path);
@@ -1290,6 +1295,7 @@ int remote_server(void)
         opt_verbose = (flags & F_VERBOSE) != 0;
         opt_quiet = (flags & F_QUIET) != 0;
         opt_force_all = (flags & F_FORCE_ALL) != 0;
+        opt_check_dest = (flags & F_CHECK_DEST) != 0;
 
         if (flags & F_SERVER_SENDS) {
                 rc = run_sender(&p, path);

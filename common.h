@@ -65,6 +65,11 @@ extern struct patterns opt_excludes;
 extern struct patterns opt_forces;
 /* --force without a pattern: copy every file whole. */
 extern int opt_force_all;
+/*
+ * --check-dest: check every destination file with dm-era. Otherwise one
+ * whose mtime is older than its destination record is taken as unwritten.
+ */
+extern int opt_check_dest;
 
 void patterns_add(struct patterns *list, const char *text);
 
