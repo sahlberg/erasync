@@ -32,19 +32,7 @@ erasync must run as root, on both hosts of a remote copy: the dm-era
 metadata and the era logs are only readable by root. It also needs
 era_invalidate from thin-provisioning-tools and user extended attributes
 on DEST. The era of each file is stored in the user.erasync.era xattr and
-in /var/lib/erasync/era/<device-id>. Both SRC and DEST must be on dm-era
-devices: erasync refuses anything else, and cp or rsync are the tools for
-that.
-
-That log belongs to the machine that owns the dm-era device. It is not
-inside the directory being copied, so it is not part of an NFS export of
-that directory, and the device-mapper target is not visible there either.
-Mounting DEST and reading it locally does not give access to the
-destination era. A remote SRC or DEST is written host:path, or
-user@host:path. erasync runs erasync on that host over ssh, and that
-process reads the era device and /var/lib/erasync/era there. The other
-path stays on this machine. The remote program is erasync on the remote
-PATH, unless --remote-path names another one.
+in /var/lib/erasync/era/<device-id>.
 
 ```
 erasync [-v] [-n] [--delete] [--exclude PATTERN]... [--force[=PATTERN]]...
